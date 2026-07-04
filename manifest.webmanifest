@@ -1,0 +1,10 @@
+{
+  "name": "Language Ai",
+  "short_name": "Language Ai",
+  "description": "Mobile-first language learning app with English through Bangla and Spanish through English.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#fff8ef",
+  "theme_color": "#111827",
+  "icons": []
+}

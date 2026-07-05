@@ -1,10 +1,11 @@
-const APP_CACHE_VERSION = 'v5.1.0-fresh-cache';
+const APP_CACHE_VERSION = 'v5.2.0-adaptive-progression';
 const CACHE = `language-ai-${APP_CACHE_VERSION}`;
 const ASSETS = [
 './',
 './index.html',
 './styles.css',
 './app.js',
+  './adaptive-engine.js',
 './firebase-backend.js',
 './manifest.webmanifest'
 ];

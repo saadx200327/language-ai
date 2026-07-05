@@ -1,442 +1,201 @@
-/*
-Language Ai - Adaptive Progression Engine
-Version: V5.2 Adaptive Progression
+(function() {
+    'use strict';
 
-Changelog:
-- V5.2: Added self-contained adaptive progression engine.
-  * Tracks every answer attempt (course, lesson, item, activity type, correct/wrong, time).
-  * Per-item mastery model (0..1) with weak/learning/solid/mastered labels.
-  * Spaced review scheduling (dueAt) per difficulty.
-  * Weak Words list, Due review list, Smart Lesson Mix, Smart Plan message.
-  * Renders a Today's Smart Plan card and a Weak Words card into optional mount points.
+    const ADAPTIVE_KEY = 'language_ai_adaptive_v1';
 
-Design notes:
-- This module is fully additive. It NEVER touches the app's STORAGE_KEY
-  or the existing state object. It uses its own key: language_ai_adaptive_v1.
-- All public helpers are exposed on window.LanguageAiAdaptive.
-- Everything is defensive: if a DOM mount point or global is missing,
-  the engine silently no-ops so the base app keeps working.
-*/
-(function () {
-'use strict';
+    function getAdaptiveState() {
+        const data = localStorage.getItem(ADAPTIVE_KEY);
+        return data ? JSON.parse(data) : { attempts: [], mastery: {} };
+    }
 
-var ADAPTIVE_KEY = 'language_ai_adaptive_v1';
-var SCHEMA_VERSION = 1;
-var START_MASTERY = 0.25;
+    function saveAdaptiveState(state) {
+        localStorage.setItem(ADAPTIVE_KEY, JSON.stringify(state));
+        syncFallback(state);
+    }
 
-// due intervals in milliseconds
-var DUE = {
-weak: 10 * 60 * 1000,      // 10 minutes
-learning: 24 * 60 * 60 * 1000,   // 1 day
-solid: 3 * 24 * 60 * 60 * 1000,  // 3 days
-mastered: 7 * 24 * 60 * 60 * 1000 // 7 days
-};
+    function syncFallback(state) {
+        const bridges = [
+            window.LanguageAiFirebase,
+            window.firebaseBackend,
+            window.LanguageAiCloud,
+            window.LanguageAiSync,
+            window.appFirebase
+        ];
+        bridges.forEach(bridge => {
+            if (bridge && (bridge.saveProgress || bridge.syncProgress || bridge.saveAdaptiveProgress)) {
+                const fn = bridge.saveAdaptiveProgress || bridge.syncProgress || bridge.saveProgress;
+                if (typeof fn === 'function') fn.call(bridge, state);
+            }
+        });
+    }
 
-function now() { return Date.now(); }
+    function recordAdaptiveAttempt(attempt) {
+        const state = getAdaptiveState();
+        const fullAttempt = {
+            courseId: attempt.courseId || 'default',
+            lessonId: attempt.lessonId || 'default',
+            itemId: attempt.itemId || 'unknown',
+            promptText: attempt.promptText || '',
+            correctAnswer: attempt.correctAnswer || '',
+            userAnswer: attempt.userAnswer || '',
+            activityType: attempt.activityType || 'unknown',
+            correct: !!attempt.correct,
+            responseMs: attempt.responseMs || 0,
+            hintUsed: !!attempt.hintUsed,
+            timestamp: Date.now()
+        };
+        state.attempts.push(fullAttempt);
+        updateItemMastery(fullAttempt, state);
+        saveAdaptiveState(state);
+    }
 
-function normalizeText(s) {
-return String(s == null ? '' : s)
-.toLowerCase()
-.replace(/[.,!?;:\u0964]/g, '')
-.replace(/\s+/g, ' ')
-.trim();
-}
+    function updateItemMastery(attempt, state) {
+        const { courseId, itemId, correct } = attempt;
+        const key = `${courseId}_${itemId}`;
+        let m = state.mastery[key] || {
+            seenCount: 0,
+            correctCount: 0,
+            wrongCount: 0,
+            currentStreak: 0,
+            lastSeenAt: 0,
+            mastery: 0.25,
+            dueAt: 0,
+            difficulty: 'weak'
+        };
 
-function freshAdaptiveState() {
-return {
-schemaVersion: SCHEMA_VERSION,
-attempts: [],   // capped history of recent attempts
-items: {},      // keyed item mastery records
-updatedAtMs: now()
-};
-}
+        m.seenCount++;
+        m.lastSeenAt = Date.now();
 
-function getAdaptiveState() {
-try {
-var raw = localStorage.getItem(ADAPTIVE_KEY);
-if (!raw) { return freshAdaptiveState(); }
-var parsed = JSON.parse(raw);
-if (!parsed || typeof parsed !== 'object') { return freshAdaptiveState(); }
-if (!Array.isArray(parsed.attempts)) { parsed.attempts = []; }
-if (!parsed.items || typeof parsed.items !== 'object') { parsed.items = {}; }
-parsed.schemaVersion = SCHEMA_VERSION;
-return parsed;
-} catch (e) {
-return freshAdaptiveState();
-}
-}
+        if (correct) {
+            m.correctCount++;
+            m.currentStreak++;
+            const streakBonus = Math.min(0.05, m.currentStreak * 0.01);
+            m.mastery = Math.min(1, m.mastery + 0.10 + streakBonus);
+        } else {
+            m.wrongCount++;
+            m.currentStreak = 0;
+            m.mastery = Math.max(0, m.mastery - 0.16);
+        }
 
-function saveAdaptiveState(stateObj) {
-try {
-var s = stateObj || freshAdaptiveState();
-s.updatedAtMs = now();
-// keep history bounded so localStorage stays small
-if (s.attempts.length > 400) { s.attempts = s.attempts.slice(-400); }
-localStorage.setItem(ADAPTIVE_KEY, JSON.stringify(s));
-return true;
-} catch (e) {
-return false;
-}
-}
-function labelFor(mastery) {
-var m = Number(mastery) || 0;
-if (m < 0.30) { return 'weak'; }
-if (m < 0.50) { return 'learning'; }
-if (m < 0.75) { return 'solid'; }
-return 'mastered';
-}
+        if (m.mastery < 0.30) m.difficulty = 'weak';
+        else if (m.mastery < 0.50) m.difficulty = 'learning';
+        else if (m.mastery < 0.75) m.difficulty = 'solid';
+        else m.difficulty = 'mastered';
 
-function dueDelayFor(label) {
-if (label === 'weak' || label === 'learning' && false) { return DUE.weak; }
-if (label === 'learning') { return DUE.learning; }
-if (label === 'solid') { return DUE.solid; }
-if (label === 'mastered') { return DUE.mastered; }
-return DUE.weak;
-}
+        let delay = 0;
+        if (!correct) delay = 10 * 60 * 1000;
+        else if (m.difficulty === 'learning') delay = 24 * 60 * 60 * 1000;
+        else if (m.difficulty === 'solid') delay = 3 * 24 * 60 * 60 * 1000;
+        else if (m.difficulty === 'mastered') delay = 7 * 24 * 60 * 60 * 1000;
+        
+        m.dueAt = Date.now() + delay;
+        state.mastery[key] = m;
+    }
 
-// Stable item key. Prefer a real item id when provided.
-function buildItemKey(attempt) {
-var a = attempt || {};
-var courseId = a.courseId || 'unknown';
-if (a.itemId) { return courseId + '::' + a.itemId; }
-var lessonId = a.lessonId == null ? 'day?' : a.lessonId;
-var type = a.activityType || 'quiz';
-var prompt = normalizeText(a.prompt || a.correct || '');
-return courseId + '::' + lessonId + '::' + type + '::' + prompt;
-}
+    function getWeakItems(courseId, limit = 5) {
+        const state = getAdaptiveState();
+        return Object.values(state.mastery)
+            .filter(m => !courseId || m.courseId === courseId)
+            .sort((a, b) => a.mastery - b.mastery)
+            .slice(0, limit);
+    }
 
-function freshItem(key, attempt) {
-var a = attempt || {};
-return {
-key: key,
-courseId: a.courseId || 'unknown',
-lessonId: a.lessonId == null ? null : a.lessonId,
-prompt: a.prompt || '',
-correct: a.correct || '',
-activityType: a.activityType || 'quiz',
-seen: 0,
-correctCount: 0,
-wrongCount: 0,
-streak: 0,
-mastery: START_MASTERY,
-label: labelFor(START_MASTERY),
-lastSeenMs: 0,
-dueAtMs: 0
-};
-}
+    function getDueReviewItems(courseId, limit = 10) {
+        const state = getAdaptiveState();
+        const now = Date.now();
+        return Object.values(state.mastery)
+            .filter(m => (!courseId || m.courseId === courseId) && m.dueAt <= now)
+            .sort((a, b) => a.dueAt - b.dueAt)
+            .slice(0, limit);
+    }
 
-// Core mastery update, following the required formula.
-function updateItemMastery(attempt) {
-if (!attempt) { return null; }
-var s = getAdaptiveState();
-var key = buildItemKey(attempt);
-var item = s.items[key] || freshItem(key, attempt);
+    function getSmartLessonMix(courseId, currentLessonId) {
+        return {
+            reviewItems: getDueReviewItems(courseId, 3),
+            lessonId: currentLessonId
+        };
+    }
 
-item.seen += 1;
-item.lastSeenMs = now();
-if (attempt.prompt && !item.prompt) { item.prompt = attempt.prompt; }
-if (attempt.correct && !item.correct) { item.correct = attempt.correct; }
+    function getSmartPlanMessage(courseId) {
+        const state = getAdaptiveState();
+        const weakCount = Object.values(state.mastery).filter(m => m.difficulty === 'weak').length;
+        if (weakCount > 5) {
+            return {
+                bn: "আজ একটু ধীরে চলি। আমরা আবার প্র্যাকটিস করবো যেগুলোতে আপনার সমস্যা হচ্ছে।",
+                en: "Let’s slow down today. Review these first..."
+            };
+        }
+        return {
+            bn: "আপনি দারুণ করছেন! নতুন কিছু শেখা যাক।",
+            en: "You are doing great! Let's learn something new."
+        };
+    }
 
-var isSpeech = attempt.activityType === 'speech';
+    window.LanguageAiAdaptive = {
+        getAdaptiveState, saveAdaptiveState, recordAdaptiveAttempt,
+        updateItemMastery: (attempt) => { const s = getAdaptiveState(); updateItemMastery(attempt, s); saveAdaptiveState(s); },
+        getWeakItems, getDueReviewItems, getSmartLessonMix, getSmartPlanMessage
+    };
 
-if (attempt.correct === true || attempt.isCorrect === true) {
-item.correctCount += 1;
-item.streak += 1;
-var streakBonus = Math.min(0.05, item.streak * 0.01);
-item.mastery = Math.min(1, item.mastery + 0.10 + streakBonus);
-} else {
-item.wrongCount += 1;
-item.streak = 0;
-// speech is forgiving: softer penalty
-var penalty = isSpeech ? 0.08 : 0.16;
-item.mastery = Math.max(0, item.mastery - penalty);
-}
+    document.addEventListener('click', (e) => {
+        const screen = document.querySelector('#screen');
+        if (!screen || !screen.contains(e.target)) return;
+        if (e.target.closest('.bottom-nav, .drawer, .topbar, .adaptive-card-btn')) return;
 
-item.label = labelFor(item.mastery);
-item.dueAtMs = now() + dueDelayFor(item.label);
-s.items[key] = item;
-saveAdaptiveState(s);
-return item;
-}
+        let correct = null;
+        const target = e.target.closest('[data-correct], [data-answer], .correct, .wrong, .success, .error');
+        if (target) {
+            if (target.dataset.correct === 'true' || target.classList.contains('correct') || target.classList.contains('success')) correct = true;
+            else if (target.dataset.correct === 'false' || target.classList.contains('wrong') || target.classList.contains('error')) correct = false;
+        }
 
-// Record a raw attempt into history AND update mastery.
-function recordAdaptiveAttempt(attempt) {
-try {
-if (!attempt) { return null; }
-var s = getAdaptiveState();
-var correct = attempt.correct === true || attempt.isCorrect === true;
-s.attempts.push({
-courseId: attempt.courseId || 'unknown',
-lessonId: attempt.lessonId == null ? null : attempt.lessonId,
-itemKey: buildItemKey(attempt),
-prompt: attempt.prompt || '',
-correctAnswer: attempt.correct && attempt.correct !== true ? attempt.correct : (attempt.correctAnswer || ''),
-userAnswer: attempt.userAnswer == null ? '' : attempt.userAnswer,
-activityType: attempt.activityType || 'quiz',
-isCorrect: correct,
-ts: now(),
-speedMs: attempt.speedMs == null ? null : attempt.speedMs,
-hintUsed: !!attempt.hintUsed
-});
-saveAdaptiveState(s);
-var normalized = {
-courseId: attempt.courseId,
-lessonId: attempt.lessonId,
-itemId: attempt.itemId,
-prompt: attempt.prompt,
-correct: correct,
-activityType: attempt.activityType
-};
-if (attempt.correct && attempt.correct !== true) { normalized.correct = correct; normalized.correctText = attempt.correct; }
-return updateItemMastery(normalized);
-} catch (e) {
-return null;
-}
-}
-function itemsForCourse(courseId) {
-var s = getAdaptiveState();
-var out = [];
-Object.keys(s.items).forEach(function (k) {
-var it = s.items[k];
-if (!courseId || it.courseId === courseId) { out.push(it); }
-});
-return out;
-}
+        if (correct === null) {
+            const feedback = document.body.innerText.toLowerCase();
+            if (['correct', 'success', 'সঠিক', 'ভালো'].some(w => feedback.includes(w))) correct = true;
+            else if (['wrong', 'try again', 'ভুল', 'আবার চেষ্টা'].some(w => feedback.includes(w))) correct = false;
+        }
 
-function getWeakItems(courseId, limit) {
-var lim = limit || 5;
-var list = itemsForCourse(courseId).filter(function (it) {
-return it.label === 'weak' || it.label === 'learning' || it.wrongCount > 0;
-});
-list.sort(function (a, b) {
-if (a.mastery !== b.mastery) { return a.mastery - b.mastery; }
-return (b.wrongCount || 0) - (a.wrongCount || 0);
-});
-return list.slice(0, lim);
-}
+        if (correct !== null) {
+            const item = e.target.closest('[data-item-id]') || { dataset: {} };
+            recordAdaptiveAttempt({
+                courseId: item.dataset.courseId,
+                lessonId: item.dataset.lessonId,
+                itemId: item.dataset.itemId,
+                correct: correct,
+                activityType: 'click'
+            });
+        }
+    }, true);
 
-function getDueReviewItems(courseId, limit) {
-var lim = limit || 10;
-var t = now();
-var list = itemsForCourse(courseId).filter(function (it) {
-return it.dueAtMs && it.dueAtMs <= t;
-});
-list.sort(function (a, b) { return (a.dueAtMs || 0) - (b.dueAtMs || 0); });
-return list.slice(0, lim);
-}
-
-function getMasteredItems(courseId, limit) {
-var lim = limit || 10;
-var list = itemsForCourse(courseId).filter(function (it) { return it.label === 'mastered'; });
-list.sort(function (a, b) { return (a.lastSeenMs || 0) - (b.lastSeenMs || 0); });
-return list.slice(0, lim);
-}
-
-// Recent performance signal: fraction correct over last N attempts for a course.
-function recentAccuracy(courseId, sampleSize) {
-var n = sampleSize || 12;
-var s = getAdaptiveState();
-var recent = s.attempts.filter(function (a) {
-return !courseId || a.courseId === courseId;
-}).slice(-n);
-if (!recent.length) { return null; }
-var hits = 0;
-recent.forEach(function (a) { if (a.isCorrect) { hits += 1; } });
-return hits / recent.length;
-}
-
-// Suggested lesson mix: ~60% current, ~25% weak/past, ~15% older mastered.
-function getSmartLessonMix(courseId, currentLessonId) {
-var acc = recentAccuracy(courseId, 12);
-var struggling = acc !== null && acc < 0.6;
-var doingWell = acc !== null && acc >= 0.85;
-
-// beginners: keep new words low
-var newTarget = struggling ? 1 : (doingWell ? 3 : 2);
-var weak = getWeakItems(courseId, struggling ? 5 : 3);
-var older = getMasteredItems(courseId, doingWell ? 3 : 2);
-
-return {
-courseId: courseId || null,
-currentLessonId: currentLessonId == null ? null : currentLessonId,
-recentAccuracy: acc,
-mode: struggling ? 'review' : (doingWell ? 'challenge' : 'balanced'),
-newWordTarget: newTarget,
-weakItems: weak,
-olderMasteredItems: older,
-allowHarderSentenceBuilding: doingWell,
-allowMixedReview: !struggling,
-mix: { currentPct: 60, weakPastPct: 25, olderMasteredPct: 15 }
-};
-}
-
-function isBanglaCourse(courseId) { return courseId === 'bnen'; }
-
-// Warm, simple Smart Plan message. Bangla-first for bnen.
-function getSmartPlanMessage(courseId) {
-var plan = getSmartLessonMix(courseId, null);
-var weakNames = plan.weakItems.map(function (it) {
-return (it.correct || it.prompt || '').toString().slice(0, 24);
-}).filter(Boolean).slice(0, 3);
-var weakList = weakNames.join(', ');
-var bn = isBanglaCourse(courseId);
-
-if (plan.recentAccuracy === null) {
-return bn
-? 'Notun shuru! Aaj olpo kore শিখবো — First lesson. Just a few words today.'
-: "Fresh start. Today we'll learn a few words and take it slow.";
-}
-if (plan.mode === 'review') {
-var r = bn
-? 'Aaj astে astে — let us slow down and review'
-: "Let's slow down today. We'll review";
-return weakList ? (r + ' ' + weakList + '.') : (r + ' your weak words.');
-}
-if (plan.mode === 'challenge') {
-return bn
-? ('Darun cholchhe! You are doing well. Today: about ' + plan.newWordTarget + ' new words and some review.')
-: ('You are doing well. Today has about ' + plan.newWordTarget + ' new words and some review.');
-}
-return bn
-? ('Balanced din. Today: about ' + plan.newWordTarget + ' new words and a little review.')
-: ('Nice pace. Today has about ' + plan.newWordTarget + ' new words and a little review.');
-}
-// --- Optional integration helpers (all defensive) ---
-
-// Try to read the active course id from the base app without depending on it.
-function detectCourseId() {
-try {
-if (window.LanguageAiState && window.LanguageAiState.courseId) { return window.LanguageAiState.courseId; }
-} catch (e) {}
-try {
-var raw = localStorage.getItem('language_ai_v1_state');
-if (raw) {
-var st = JSON.parse(raw);
-if (st && st.courseId) { return st.courseId; }
-}
-} catch (e) {}
-return 'bnen';
-}
-
-function esc(s) {
-return String(s == null ? '' : s)
-.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-
-// Render the Today's Smart Plan card into #adaptiveSmartPlan if present.
-function renderSmartPlanCard(courseId) {
-var mount = document.getElementById('adaptiveSmartPlan');
-if (!mount) { return; }
-var cid = courseId || detectCourseId();
-var msg = getSmartPlanMessage(cid);
-mount.innerHTML =
-'<div class="card stack adaptive-card">' +
-'<div class="eyebrow">Today\'s Smart Plan</div>' +
-'<p class="lead">' + esc(msg) + '</p>' +
-'</div>';
-}
-
-// Render the Weak Words card into #adaptiveWeakWords if present.
-function renderWeakWordsCard(courseId) {
-var mount = document.getElementById('adaptiveWeakWords');
-if (!mount) { return; }
-var cid = courseId || detectCourseId();
-var weak = getWeakItems(cid, 5);
-if (!weak.length) {
-mount.innerHTML =
-'<div class="card stack adaptive-card">' +
-'<div class="eyebrow">Weak Words</div>' +
-'<p class="lead">No weak words yet. Keep practicing!</p>' +
-'</div>';
-return;
-}
-var rows = weak.map(function (it) {
-var text = it.correct || it.prompt || '';
-return '<article class="card stack">' +
-'<h1>' + esc(text) + '</h1>' +
-'<p class="lead">' + esc(it.prompt || '') + '</p>' +
-'<div class="audio-row">' +
-'<button class="small-action" data-adaptive-speak="' + esc(text) + '">\uD83D\uDD0A Hear</button>' +
-'<button class="small-action" data-adaptive-retry="' + esc(it.key) + '">Retry</button>' +
-'</div></article>';
-}).join('');
-mount.innerHTML =
-'<div class="card stack adaptive-card">' +
-'<div class="eyebrow">Weak Words</div>' +
-'<p class="lead">Your weakest 5 for this course.</p>' + rows +
-'</div>';
-wireWeakWordButtons(mount, cid);
-}
-
-function wireWeakWordButtons(root, courseId) {
-if (!root) { return; }
-root.querySelectorAll('[data-adaptive-speak]').forEach(function (b) {
-b.addEventListener('click', function () {
-var text = b.getAttribute('data-adaptive-speak');
-try {
-if ('speechSynthesis' in window) {
-var u = new SpeechSynthesisUtterance(text);
-u.lang = courseId === 'enes' ? 'es-ES' : 'en-US';
-speechSynthesis.cancel();
-speechSynthesis.speak(u);
-}
-} catch (e) {}
-});
-});
-root.querySelectorAll('[data-adaptive-retry]').forEach(function (b) {
-b.addEventListener('click', function () {
-try { window.location.hash = '#review'; } catch (e) {}
-});
-});
-}
-
-function renderAdaptiveUI(courseId) {
-renderSmartPlanCard(courseId);
-renderWeakWordsCard(courseId);
-}
-
-// If the base app exposes a progress payload hook, add adaptive summary.
-function adaptiveProgressSummary(courseId) {
-var cid = courseId || detectCourseId();
-var s = getAdaptiveState();
-return {
-adaptiveSchemaVersion: SCHEMA_VERSION,
-recentAccuracy: recentAccuracy(cid, 12),
-weakCount: getWeakItems(cid, 999).length,
-totalTrackedItems: Object.keys(s.items).length,
-updatedAtMs: s.updatedAtMs
-};
-}
-
-// Public API
-window.LanguageAiAdaptive = {
-getAdaptiveState: getAdaptiveState,
-saveAdaptiveState: saveAdaptiveState,
-recordAdaptiveAttempt: recordAdaptiveAttempt,
-updateItemMastery: updateItemMastery,
-getWeakItems: getWeakItems,
-getDueReviewItems: getDueReviewItems,
-getSmartLessonMix: getSmartLessonMix,
-getSmartPlanMessage: getSmartPlanMessage,
-renderAdaptiveUI: renderAdaptiveUI,
-adaptiveProgressSummary: adaptiveProgressSummary,
-version: 'V5.2 Adaptive Progression'
-};
-
-// Initialize storage safely on load.
-try {
-if (!localStorage.getItem(ADAPTIVE_KEY)) { saveAdaptiveState(freshAdaptiveState()); }
-} catch (e) {}
-
-// Attempt to render cards once DOM is ready (no-op if mounts are absent).
-function bootRender() {
-try { renderAdaptiveUI(detectCourseId()); } catch (e) {}
-}
-if (document.readyState === 'loading') {
-document.addEventListener('DOMContentLoaded', bootRender);
-} else {
-bootRender();
-}
-
+    function injectUI() {
+        const screen = document.querySelector('#screen');
+        if (!screen) return;
+        const view = document.body.dataset.view || '';
+        if (view === 'home' && !screen.querySelector('.smart-plan')) {
+            const plan = getSmartPlanMessage();
+            const card = document.createElement('div');
+            card.className = 'adaptive-card smart-plan glass';
+            card.style = 'margin: 10px; padding: 15px; border-radius: 15px; background: rgba(255,255,255,0.8); box-shadow: 0 4px 6px rgba(0,0,0,0.1);';
+            card.innerHTML = `<strong>Today's Smart Plan</strong><p style="margin:5px 0;">${plan.bn}</p><small style="color:#666;">${plan.en}</small>`;
+            screen.prepend(card);
+        }
+        if (view === 'review' && !screen.querySelector('.weak-words')) {
+            const weak = getWeakItems();
+            if (weak.length > 0) {
+                const card = document.createElement('div');
+                card.className = 'adaptive-card weak-words glass';
+                card.style = 'margin: 10px; padding: 15px; border-radius: 15px; background: rgba(255,255,255,0.8);';
+                card.innerHTML = '<h3 style="margin-top:0;">Weak Items</h3>' + weak.map(i => `
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin:8px 0;padding:8px;background:#fff;border-radius:10px;">
+                        <span>${i.itemId}</span>
+                        <button class="adaptive-card-btn" style="border:none;background:none;font-size:20px;cursor:pointer;padding:5px;">🔊</button>
+                    </div>
+                `).join('');
+                screen.appendChild(card);
+            }
+        }
+    }
+    const observer = new MutationObserver(() => injectUI());
+    observer.observe(document.body, { attributes: true, attributeFilter: ['data-view'] });
+    setInterval(injectUI, 3000);
 })();

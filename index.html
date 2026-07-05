@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#f8f7f4" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>Language Ai — V5 Firebase Course</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <button id="menuBtn" class="icon-btn" aria-label="Open menu" aria-expanded="false">☰</button>
+      <div class="brand-block">
+        <div class="brand">Language Ai</div>
+        <div id="subtitle" class="subtitle">Firebase course build</div>
+      </div>
+      <button id="soundToggle" class="icon-btn" aria-label="Toggle sound">🔊</button>
+    </header>
+
+    <aside id="drawer" class="drawer" aria-hidden="true">
+      <div class="drawer-card glass">
+        <div class="drawer-head">
+          <div>
+            <div class="drawer-title">Language Ai</div>
+            <div class="drawer-subtitle">V5 Firebase Course</div>
+          </div>
+          <button id="closeDrawer" class="icon-btn" aria-label="Close menu">×</button>
+        </div>
+        <button class="drawer-link" data-view="home">🏠 Home</button>
+        <button class="drawer-link" data-view="course">🎮 Daily lesson</button>
+        <button class="drawer-link" data-view="review">🧠 Review mode</button>
+        <button class="drawer-link" data-view="games">🃏 Mini games</button>
+        <button class="drawer-link" data-view="vocab">📚 Vocabulary</button>
+        <button class="drawer-link" data-view="sentences">🧩 Sentences</button>
+        <button class="drawer-link" data-view="sound">🎙️ Pronunciation</button>
+        <button class="drawer-link" data-view="leaderboard">🏅 Leaderboard</button>
+        <button class="drawer-link" data-view="progress">📈 Progress</button>
+        <button class="drawer-link" data-view="help">🤝 Help</button>
+        <button class="drawer-link" data-view="about">✨ About</button>
+        <button class="drawer-link" data-view="settings">⚙️ Settings</button>
+        <div class="drawer-note">Firebase-ready Netlify build. Cloud signup, guest auth, synced progress, and public leaderboard are included with phone-only fallback.</div>
+      </div>
+    </aside>
+
+    <main id="screen" class="screen" tabindex="-1"></main>
+
+    <nav class="bottom-nav glass" aria-label="Main navigation">
+      <button class="nav-btn active" data-view="home"><span>🏠</span><small>Home</small></button>
+      <button class="nav-btn" data-view="course"><span>🎮</span><small>Learn</small></button>
+      <button class="nav-btn" data-view="review"><span>🧠</span><small>Review</small></button>
+      <button class="nav-btn" data-view="games"><span>🃏</span><small>Games</small></button>
+      <button class="nav-btn" data-view="leaderboard"><span>🏅</span><small>Ranks</small></button>
+    </nav>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="firebase-backend.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
